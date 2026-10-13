@@ -1,0 +1,51 @@
+# 安装 MacClean
+
+## 下载与适用范围
+
+从 [v0.3.0 Releases](https://github.com/daxiangnaoyang/MacClean/releases/tag/v0.3.0) 下载：
+
+| 文件 | 用途 |
+| --- | --- |
+| `MacClean-0.3.0-arm64.dmg` | 拖放式安装，内含应用及 Applications 入口 |
+| `MacClean-0.3.0-arm64.app.zip` | 解压后获得同一版本应用 |
+| `MacClean-0.3.0-docs.zip` | 可离线阅读的全部说明图文 |
+| `SHA256SUMS.txt` | 下载文件完整性校验 |
+
+要求 Apple Silicon Mac（M 系列芯片）。项目最低部署目标为 macOS 14，未在所有 macOS 版本上验证；Intel 未提供预编译包。无需安装 Swift 或 Node 即可使用发行应用。
+
+## 安装与桌面入口
+
+1. 打开 DMG，将 `MacClean.app` 拖到 `Applications`。ZIP 用户先解压，再将应用移到 Applications。
+2. 弹出 DMG，从 Applications 打开 MacClean。首次使用先只读扫描一个小目录，再检查结果。
+3. 需要桌面入口时，在 Finder 对已安装应用创建替身，将替身移到桌面。替身不会创建独立旧版副本。
+4. 更新前使用 `⌘Q` 完全退出 MacClean；替换应用后重新打开。替换应用不主动清除本机清理历史或保留设置。
+
+## 首次打开可能被 macOS 拦截
+
+本版只有 ad-hoc 签名，**没有 Developer ID 签名及 Apple 公证**。它不是 App Store 应用，不能把签名检查通过当成 Apple 安全认证。
+
+若系统提示开发者无法验证，请先核对仓库来源和 SHA-256。如果确认来源可信且文件未被篡改，可根据 [Apple 的安全打开说明](https://support.apple.com/en-us/102445)，在尝试打开后进入“系统设置 → 隐私与安全性”，检查是否有针对本应用的“仍要打开”入口。是否允许例外由本人决定，企业管理策略可能禁止。
+
+如果系统提示文件已损坏、包含恶意软件或校验不匹配，停止打开并反馈问题。本项目不要求关闭 Gatekeeper、SIP 或全局安全设置。
+
+## 权限与扫描
+
+首次访问下载、桌面或文档可能出现系统授权提示。没有权限的目录会记录访问错误，不会算作零占用；拒绝权限后仍可扫描其他已授权目录。
+
+需要分析受隐私保护的目录时，可自行决定是否在“隐私与安全性 → 完全磁盘访问权限”添加 MacClean。权限增加不改变清理保护规则，不保证覆盖所有文件。不请求管理员权限。
+
+![扫描设置示例](images/settings.png)
+
+## 校验下载
+
+将发行附件放到同一目录后运行：
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+若只下载了其中一个安装包，可用 `shasum -a 256 MacClean-0.3.0-arm64.dmg`，与清单的对应行核对。缺少其他附件会显示读取失败，不等于已下载文件校验失败。
+
+## 卸载 MacClean 本身
+
+完全退出应用后，把 Applications 中的 MacClean 移入废纸篓；桌面替身可以单独移除。本机 `~/Library/Application Support/MacClean/` 的恢复历史与保留设置不会自动删除。保留历史有助于找回此前移入废纸篓的文件。

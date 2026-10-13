@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+.swiftpm/
+MacClean.app/
+dist/
+*.dmg
+*.app.zip
+scan-report.json
+history.json
+keep.json
+.env
+.env.*
+*.pem
+*.p12
+*.key
