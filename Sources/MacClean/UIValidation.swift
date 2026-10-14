@@ -44,7 +44,7 @@ enum UIValidation {
         model.history = [TrashRecord(id: UUID(), original: log.path, trashPath: home + "/.Trash/previous.log", size: log.logicalSize, date: now, status: "已移入废纸篓"), TrashRecord(id: UUID(), original: home + "/Library/Logs/ExampleApp/restored.log", trashPath: nil, size: 12_000_000, date: now, status: "已恢复"), TrashRecord(id: UUID(), original: home + "/Library/Logs/ExampleApp/in-use.log", trashPath: nil, size: 8_000_000, date: now, status: "失败", error: "示例：文件仍被程序占用，本次保留。")]
         model.page = .history
         try snapshot(ContentView(model: model), named: "recovery", in: directory)
-        try snapshot(ScanSettings(model: model).preferredColorScheme(.dark), named: "settings", in: directory, size: NSSize(width: 820, height: 640))
+        try snapshot(ScanSettings(model: model).preferredColorScheme(.dark), named: "settings", in: directory, size: NSSize(width: 820, height: 760))
         model.pending = [ActionTarget(log), ActionTarget(installer)]
         try snapshot(ConfirmSheet(model: model).preferredColorScheme(.dark), named: "preview", in: directory, size: NSSize(width: 820, height: 560))
         print("PUBLIC DEMO RENDER PASSED: 8 images, synthetic data only")

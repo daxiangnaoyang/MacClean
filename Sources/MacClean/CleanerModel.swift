@@ -2,15 +2,15 @@ import SwiftUI
 import AppKit
 
 enum Page: String, CaseIterable {
-    case overview = "总览", space = "空间分析", rules = "规则扫描", apps = "应用卸载", history = "恢复中心"
+    case overview = "清理首页", space = "空间分析", rules = "清理结果", apps = "应用卸载", history = "恢复中心"
     var icon: String {
         switch self { case .overview: "square.grid.2x2.fill"; case .space: "chart.pie.fill"; case .rules: "slider.horizontal.3"; case .apps: "square.stack.3d.up.fill"; case .history: "clock.arrow.circlepath" }
     }
     var subtitle: String {
         switch self {
-        case .overview: "看清空间去向，再决定如何整理。"
+        case .overview: "检查常见缓存和旧日志，确认后再清理。"
         case .space: "递归统计真实文件大小，逐层深入占用最多的目录。"
-        case .rules: "每个结果都有命中依据；缓存、旧文件与个人数据分别判断。"
+        case .rules: "按应用查看建议；需要确认的项目单独处理。"
         case .apps: "预览应用本体和按 Bundle ID 匹配的关联文件。"
         case .history: "记录每次操作，并从系统废纸篓恢复到原位置。"
         }
@@ -20,12 +20,15 @@ enum Page: String, CaseIterable {
 @MainActor final class CleanerModel: ObservableObject {
     @Published var page: Page = .overview
     @Published var report: ScanReport?
+    @Published var analysisReport: ScanReport?
+    @Published var analysisStale = false
+    @Published var scanIsAnalysis = false
     @Published var scanning = false
     @Published var appLoading = false
     @Published var busy = false
     @Published var progress = ScanProgress(path: "", visited: 0, measured: 0)
-    @Published var roots = ScanEngine.defaultRoots()
-    @Published var options = ScanOptions()
+    @Published var roots = ScanEngine.defaultRoots() { didSet { persistScanPreferences() } }
+    @Published var options = ScanOptions() { didSet { persistScanPreferences() } }
     @Published var apps: [AppInfo] = []
     @Published var appIssues: [ScanIssue] = []
     @Published var related: [Candidate] = []
@@ -50,18 +53,27 @@ enum Page: String, CaseIterable {
     var documentationDemo = false
     @Published private(set) var runtimeBlocks: [String: String] = [:]
     private var pendingApp = false
+    private var pendingRecommended = false
     private var control: ScanControl?
     private var appControl: ScanControl?
     private var relatedControl: ScanControl?
     let store: TrashStore
     let keepStore: KeepStore
     let advisor: RecommendationEngine
+    private let preferencesStore: ScanPreferencesStore
+    private var preferencesReady = false
+    private var bookmarks: [String: Data] = [:]
+    private var directoryGrants: [String: DirectoryGrant] = [:]
     var candidates: [Candidate] { report?.candidates ?? [] }
+    func cleanupGroup(_ candidate: Candidate) -> String { QuickCleaning.owner(candidate, home: advisor.home) }
     var filtered: [Candidate] {
         candidates.filter { (category == "全部" || $0.category == category) && (riskFilter == "全部" || recommendation($0).decision.rawValue == riskFilter) && (query.isEmpty || $0.item.path.localizedCaseInsensitiveContains(query) || $0.item.type.contains(query)) }
     }
     var selectedSize: Int64 { candidates.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.item.logicalSize } }
     var cacheSize: Int64 { candidates.filter { $0.risk == .regenerable }.reduce(0) { $0 + $1.item.logicalSize } }
+    var recognizedCacheSize: Int64 { candidates.filter { $0.risk == .regenerable && QuickCleaning.cacheRule($0.id, home: advisor.home) != nil }.reduce(0) { $0 + $1.item.logicalSize } }
+    var deferredCacheSize: Int64 { candidates.filter { recommendation($0).rule == "owner-running" }.reduce(0) { $0 + $1.item.logicalSize } }
+    var detectedLogSize: Int64 { candidates.filter { QuickCleaning.isLog($0.item, home: advisor.home) }.reduce(0) { $0 + $1.item.logicalSize } }
     var recommended: [Candidate] { candidates.filter { recommendation($0).decision == .delete } }
     var recommendedSize: Int64 { recommended.reduce(0) { $0 + $1.item.logicalSize } }
     func recommendation(_ candidate: Candidate) -> Advice {
@@ -94,7 +106,7 @@ enum Page: String, CaseIterable {
         selected = selected.filter { path in candidates.contains { $0.id == path && recommendation($0).decision != .required } }
     }
     var spaceItems: [ScanItem] {
-        guard let report else { return [] }
+        guard let report = analysisReport else { return [] }
         return report.items.filter { item in
             let atLevel = spaceType == "全部" ? (folder.map { parentPath(item.path) == $0 } ?? report.roots.contains(item.path)) : (!item.isDirectory && item.type == spaceType)
             return atLevel && (query.isEmpty || item.name.localizedCaseInsensitiveContains(query))
@@ -107,6 +119,23 @@ enum Page: String, CaseIterable {
     }
     init(store: TrashStore = TrashStore(), keepStore: KeepStore = KeepStore(), advisor: RecommendationEngine = RecommendationEngine()) {
         self.store = store; self.keepStore = keepStore; self.advisor = advisor
+        preferencesStore = ScanPreferencesStore(url: keepStore.url.deletingLastPathComponent().appendingPathComponent("scan-settings.json"))
+        do {
+            if let saved = try preferencesStore.load() {
+                roots = saved.roots.map { URL(fileURLWithPath: $0) }; options = saved.options; bookmarks = saved.bookmarks
+                for (path, data) in saved.bookmarks {
+                    do {
+                        let restored = try DirectoryGrant.restore(data)
+                        directoryGrants[path] = restored.grant
+                        if let renewed = restored.refreshed { bookmarks[path] = renewed }
+                        if restored.grant.url.path != path {
+                            roots = roots.map { $0.path == path ? restored.grant.url : $0 }
+                        }
+                    } catch { notice = "目录授权已失效：\(path)。请在扫描设置中重新授权；其他目录仍可扫描。" }
+                }
+            }
+            preferencesReady = true
+        } catch { notice = "扫描设置读取失败，保留原文件且不覆盖：\(error.localizedDescription)" }
         do { keptPaths = try keepStore.load() } catch { keepReady = false; notice = "保留设置读取失败，一键清理已停用：\(error.localizedDescription)" }
         refreshHistory()
     }
@@ -115,32 +144,63 @@ enum Page: String, CaseIterable {
         roots = report.roots.map { URL(fileURLWithPath: $0) }
         activity = ActivitySnapshot(known: true, processNames: [])
         self.report = advisor.apply(to: report, activity: activity)
+        analysisReport = report
+        riskFilter = AdviceDecision.delete.rawValue
+        selected = Set(recommended.map(\.id))
         notice = "演示数据 · 路径、应用和容量均为虚构示例，不代表实际扫描结果。"
     }
     func refreshHistory() { do { history = try store.load() } catch { notice = "恢复记录读取失败：\(error.localizedDescription)" } }
-    func scan() {
+    private func persistScanPreferences() {
+        guard preferencesReady, !documentationDemo else { return }
+        analysisStale = analysisReport != nil
+        do { try preferencesStore.save(ScanPreferences(roots: roots.map(\.path), options: options, bookmarks: bookmarks)) }
+        catch { notice = "扫描设置未保存：\(error.localizedDescription)" }
+    }
+    func authorizeHome() { pickFolder(homeOnly: true) }
+    func scan(fullDisk: Bool = false) {
         guard !scanning, !busy else { return }
+        let analyzing = fullDisk || page == .space
+        scanIsAnalysis = analyzing
         let token = ScanControl(); control = token
         scanning = true; selected.removeAll(); folder = nil; spaceType = "全部"; query = ""; notice = nil
-        let scanRoots = roots; let settings = options
+        let scanRoots = roots; let settings = options; let home = advisor.home
         Task { [self] in
             let result = await Task.detached(priority: .userInitiated) {
-                ScanEngine.scan(roots: scanRoots, options: settings, control: token) { update in
+                let updateProgress: @Sendable (ScanProgress) -> Void = { update in
                     Task { @MainActor [weak self] in
                         guard let self, self.control === token else { return }
                         self.progress = update
                     }
                 }
+                return analyzing ? ScanEngine.scan(roots: scanRoots, options: settings, control: token, progress: updateProgress) : QuickCleaning.scan(home: home, control: token, progress: updateProgress)
             }.value
             activity = ActivitySnapshot.capture()
-            report = advisor.apply(to: result, activity: activity, kept: keptPaths); runtimeBlocks.removeAll(); stale = false; scanning = false
+            if analyzing { analysisReport = result; analysisStale = false; page = .space }
+            else {
+                report = advisor.apply(to: result, activity: activity, kept: keptPaths)
+                runtimeBlocks.removeAll(); stale = false; selected = Set(recommended.map(\.id)); page = .rules
+                category = "全部"; riskFilter = recommended.isEmpty ? (candidates.contains { recommendation($0).decision == .keep } ? AdviceDecision.keep.rawValue : AdviceDecision.required.rawValue) : AdviceDecision.delete.rawValue
+            }
+            scanning = false
         }
     }
     func cancel() { control?.cancel() }
-    func pickFolder() {
+    func pickFolder(homeOnly: Bool = false) {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = true
-        panel.message = "加入需要递归分析的目录（仅扫描不会修改文件）"
-        if panel.runModal() == .OK { roots = ScanEngine.normalizedRoots(roots + panel.urls) }
+        if homeOnly { panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser; panel.allowsMultipleSelection = false }
+        panel.message = "选择目录并记住授权。以后扫描直接复用；系统受保护数据仍需完全磁盘访问。"
+        panel.prompt = "授权并记住"
+        if panel.runModal() == .OK {
+            var granted: [URL] = []
+            for url in panel.urls {
+                do {
+                    let grant = DirectoryGrant(url)
+                    bookmarks[url.path] = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+                    directoryGrants[url.path] = grant; granted.append(url)
+                } catch { notice = "目录授权无法保存：\(error.localizedDescription)" }
+            }
+            roots = ScanEngine.normalizedRoots(roots + granted)
+        }
     }
     func loadApps() {
         guard !appLoading, !busy else { return }
@@ -162,12 +222,20 @@ enum Page: String, CaseIterable {
             related = result.items; relatedIssues = result.issues; relatedLoading = false
         }
     }
+    func planRecommended() {
+        guard !scanning, !busy, !stale, keepReady, report?.cancelled != true else { return }
+        refreshRecommendations(); pendingApp = false; pendingRecommended = true
+        pending = recommended.map { ActionTarget($0.item) }
+        confirm = !pending.isEmpty
+        if pending.isEmpty { notice = "当前没有通过检查的建议项。" }
+    }
     func planRules() {
-        refreshRecommendations(); pendingApp = false
+        refreshRecommendations(); pendingApp = false; pendingRecommended = false
         pending = candidates.filter { selected.contains($0.id) && recommendation($0).decision != .required }.map { ActionTarget($0.item) }
         confirm = !pending.isEmpty
     }
     func planApp() {
+        pendingRecommended = false
         guard let app = focusedApp, !app.protected, !AppScanner.running(app) else { notice = "请先退出此应用；系统应用和 MacClean 受保护。"; return }
         pendingApp = true
         pending = related.filter { appSelected.contains($0.id) && $0.item.complete }.map { ActionTarget($0.item) }
@@ -176,6 +244,7 @@ enum Page: String, CaseIterable {
     }
     func execute() {
         guard !busy else { return }
+        if pendingRecommended { pendingRecommended = false; confirm = false; deleteRecommended(); return }
         if let app = focusedApp, pendingApp, AppScanner.running(app) { notice = "应用仍在运行，请退出后重试。"; return }
         let targets = pending; let trashStore = store; busy = true; confirm = false
         let isApp = pendingApp; let adviceEngine = advisor
@@ -246,7 +315,7 @@ enum Page: String, CaseIterable {
     }
     func reveal(_ path: String) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
     func exportReport() {
-        guard let report else { return }
+        guard let report = page == .space ? analysisReport : report else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = "MacClean-扫描报告.json"; panel.allowedContentTypes = [.json]
         if panel.runModal() == .OK, let url = panel.url {
             do { let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; try encoder.encode(report).write(to: url, options: .atomic); notice = "扫描报告已导出。" }

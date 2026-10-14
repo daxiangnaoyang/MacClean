@@ -9,6 +9,8 @@ scan-report.json
 history.json
 keep.json
 .env
+.signing-identity
+scan-settings.json
 .env.*
 *.pem
 *.p12

@@ -67,7 +67,7 @@ struct KeepStore: Sendable {
 struct RecommendationEngine: Sendable {
     let home: String
     init(home: String = FileManager.default.homeDirectoryForCurrentUser.path) { self.home = home }
-    static let policyVersion = "conservative-v1"
+    static let policyVersion = "semantic-cache-v2"
 
     func mandatoryReason(_ item: ScanItem, risk: Risk) -> String? {
         if risk == .protected { return "受保护位置或访问状态无法确认，禁止通过规则清理。" }
@@ -84,6 +84,11 @@ struct RecommendationEngine: Sendable {
         return nil
     }
     private func cacheOwner(_ path: String) -> (tools: [String], ids: [String], label: String)? {
+        if QuickCleaning.isBrowserCache(path, home: home) {
+            if path.contains("/Google/Chrome/") { return (["google chrome", "chrome", "chrome-headless-shell"], ["com.google.chrome"], "Chrome") }
+            if path.contains("/Microsoft Edge/") { return (["microsoft edge"], ["com.microsoft.edgemac"], "Edge") }
+            return (["brave browser"], ["com.brave.browser"], "Brave")
+        }
         if under(path, home + "/.npm/_cacache") { return (["node", "nodejs", "npm", "npx", "node_repl", "bun", "deno"], [], "Node/npm") }
         if under(path, home + "/.cache/pip") { return (["python", "python3", "pip", "pip3", "uv"], [], "Python/pip") }
         if under(path, home + "/Library/Developer/Xcode/DerivedData") { return (["xcode", "xcodebuild", "swift", "swift-build", "swift-frontend", "clang", "clang++", "sourcekit-lsp"], ["com.apple.dt.xcode"], "Xcode/Swift") }
@@ -99,10 +104,18 @@ struct RecommendationEngine: Sendable {
     }
     func advice(for candidate: Candidate, activity: ActivitySnapshot, now: Date = Date(), kept: Set<String> = []) -> Advice {
         let item = candidate.item
-        if let reason = mandatoryReason(item, risk: candidate.risk) { return Advice(decision: .required, reason: reason, rule: "protected-data") }
+        let preciseRule = candidate.risk == .regenerable && ["应用缓存", "开发缓存"].contains(candidate.category) ? QuickCleaning.cacheRule(item.path, home: home) : nil
+        let preciseCache = preciseRule != nil
+        if !preciseCache, let reason = mandatoryReason(item, risk: candidate.risk) { return Advice(decision: .required, reason: reason, rule: "protected-data") }
         if KeepStore.retains(item.path, paths: kept) { return Advice(decision: .keep, reason: "你已标记保留，后续扫描继续排除。", rule: "user-keep") }
         guard item.complete else { return Advice(decision: .keep, reason: "此项目未完整扫描，暂不推荐删除。", rule: "incomplete") }
         guard activity.known else { return Advice(decision: .keep, reason: "未取得当前运行状态，无法确认是否在用。", rule: "activity-unknown") }
+        if let rule = preciseRule {
+            if activity.contains(rule.tools) || !activity.applicationIDs.isDisjoint(with: rule.ids) {
+                return Advice(decision: .required, reason: "已识别为可再生成缓存；\(rule.label)相关应用或任务正在运行，退出后可重新检查。", rule: "owner-running")
+            }
+            return Advice(decision: .delete, reason: "已识别\(rule.label)，不要求整目录闲置14天；清理前会重检变化与占用。可能需要重新下载或生成。", rule: "semantic-cache")
+        }
         if candidate.risk == .regenerable {
             guard let owner = cacheOwner(item.path) else { return Advice(decision: .keep, reason: "位于缓存目录，但归属和再生成方式未确认；不进入一键建议。", rule: "cache-owner-unknown") }
             if activity.contains(owner.tools) || !activity.applicationIDs.isDisjoint(with: owner.ids) {
@@ -115,9 +128,14 @@ struct RecommendationEngine: Sendable {
             guard days >= 14 else { return Advice(decision: .keep, reason: "最近 \(max(0, days)) 天内仍有写入；暂保留近期使用的缓存。", rule: "recent-cache") }
             return Advice(decision: .delete, reason: "已确认 \(owner.label) 可再生成缓存；目录内最新写入距今 \(days) 天，当前未检测到相关运行任务。清理后可能需要重新下载或构建。", rule: "idle-old-cache")
         }
-        if candidate.category == "旧日志", !item.isDirectory, under(item.path, home + "/Library/Logs"), item.type == "日志", let modified = item.modified, now.timeIntervalSince(modified) >= 30 * 86400 {
-            return Advice(decision: .delete, reason: "用户日志目录中至少 30 天未修改的日志，不属于程序组件。若需历史排错记录，可标记保留。", rule: "old-log")
+        if ["旧日志", "日志"].contains(candidate.category), QuickCleaning.isLog(item, home: home), under(item.path, home + "/Library/Logs") {
+            guard let modified = item.modified else { return Advice(decision: .keep, reason: "日志修改时间无法确认，本次保留。", rule: "log-date-unknown") }
+            if now.timeIntervalSince(modified) >= 7 * 86400 {
+                return Advice(decision: .delete, reason: "用户日志至少7天未修改；清理前检查占用。需要历史排错记录时可忽略。", rule: "historical-log")
+            }
+            return Advice(decision: .keep, reason: "近7天的日志或诊断报告，默认保留用于排错；确认不需要后可手动选择。", rule: "recent-log")
         }
+        if candidate.category == "更新安装包" { return Advice(decision: .keep, reason: "可能是等待安装的更新包。确认应用更新完成、退出更新器后再手动处理。", rule: "update-review") }
         return Advice(decision: .keep, reason: candidate.category == "旧安装包" ? "安装包是否仍需要无法自动确认，默认保留；确认安装完成后可手动选择删除。" : "个人文件或用途未确认，大小和修改时间不足以证明无用。", rule: "personal-or-unknown")
     }
     func apply(to report: ScanReport, activity: ActivitySnapshot, kept: Set<String> = []) -> ScanReport {

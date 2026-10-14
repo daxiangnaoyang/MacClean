@@ -6,6 +6,9 @@ enum Verification {
     }
     static func run() throws {
         let fm = FileManager.default
+        try expect(ScanOptions().entryLimit == 0 && ScanOptions().maxDepth == 0, "Default deep scan still stops at a global item/depth cap")
+        let defaultScope = ScanEngine.defaultRoots().map(\.path)
+        try expect(defaultScope.contains(fm.homeDirectoryForCurrentUser.path) && defaultScope.contains("/Applications") && defaultScope.contains("/Library"), "Default scope still omits home or global applications/library")
         try expect(PathPolicy.runtimeProtectedTrees.contains(Bundle.main.bundlePath), "Running bundle protection missing")
         do {
             try PathPolicy(allowedRoots: ["/"]).validate(Bundle.main.bundlePath)
@@ -14,6 +17,44 @@ enum Verification {
         let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("MacClean-test-" + UUID().uuidString)
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) } // This exact directory is created exclusively by this test.
+        let quickHome = root.appendingPathComponent("quick-home")
+        let profile = quickHome.appendingPathComponent("Library/Application Support/Google/Chrome/Default")
+        try fm.createDirectory(at: profile.appendingPathComponent("Cache"), withIntermediateDirectories: true)
+        let cache = profile.appendingPathComponent("Cache/file.bin")
+        try Data(repeating: 1, count: 1024).write(to: cache)
+        try Data("private".utf8).write(to: profile.appendingPathComponent("Login Data"))
+        let quick = QuickCleaning.scan(home: quickHome.path, control: ScanControl()) { _ in }
+        try expect(quick.measuredSize == 1024 && !quick.items.contains { $0.path.contains("Login Data") }, "Quick cleaning scanned browser credentials")
+        try expect(!quick.roots.contains(quickHome.path) && !quick.roots.contains("/System"), "Quick cleaning became a full disk scan")
+        try expect(quick.candidates.contains { $0.item.path == profile.appendingPathComponent("Cache").path && $0.risk == .regenerable }, "Exact browser cache rule missing")
+        try expect(!QuickCleaning.isBrowserCache(profile.path, home: quickHome.path) && !QuickCleaning.isBrowserCache(profile.appendingPathComponent("Login Data").path, home: quickHome.path), "Browser profile/data protection bypassed")
+        try expect(!QuickCleaning.isBrowserCache(profile.appendingPathComponent("Cache/../Login Data").path, home: quickHome.path), "Cache traversal bypassed protection")
+        let browserAdvisor = RecommendationEngine(home: quickHome.path)
+        var cacheItem = quick.candidates[0].item
+        cacheItem.latestModified = Date().addingTimeInterval(-45 * 86400)
+        let browserCandidate = Candidate(item: cacheItem, category: "应用缓存", reason: "fixture", risk: .regenerable)
+        try expect(browserAdvisor.advice(for: browserCandidate, activity: ActivitySnapshot(known: true, processNames: [])).decision == .delete, "Exact browser cache cannot become a recommendation")
+        try expect(browserAdvisor.advice(for: browserCandidate, activity: ActivitySnapshot(known: true, processNames: ["chrome"])).decision == .required, "Active browser cache was recommended")
+        var recentCache = cacheItem
+        recentCache.latestModified = Date()
+        let recentCandidate = Candidate(item: recentCache, category: "应用缓存", reason: "fixture", risk: .regenerable)
+        try expect(browserAdvisor.advice(for: recentCandidate, activity: ActivitySnapshot(known: true, processNames: [])).decision == .delete, "Known disposable cache incorrectly requires 14 idle days")
+        let cacheFiles = ["Library/Caches/pip/http-v2/a.bin", "Library/Caches/node-gyp/22.22.3/include/node/a.h", "Library/Caches/Doubao/Default/Cache/a.bin", "Library/Caches/Codex/Default/Partitions/session/Code Cache/a.bin", "Library/Caches/Trae CN/update.zip", "Library/Logs/recent.log", "Library/Logs/archive.log.1.gz"]
+        for relative in cacheFiles {
+            let url = quickHome.appendingPathComponent(relative)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(repeating: 1, count: 2048).write(to: url)
+        }
+        let catalog = QuickCleaning.scan(home: quickHome.path, control: ScanControl()) { _ in }
+        let recognized = catalog.candidates.filter { QuickCleaning.cacheRule($0.id, home: quickHome.path) != nil }
+        try expect(recognized.count >= 5, "macOS pip, node-gyp or Electron cache missing: " + recognized.map { QuickCleaning.owner($0, home: quickHome.path) }.joined(separator: ", "))
+        try expect(catalog.candidates.contains { $0.item.name == "recent.log" && $0.category == "日志" }, "Recent log disappeared from results")
+        try expect(catalog.candidates.contains { $0.item.name == "archive.log.1.gz" && $0.category == "日志" }, "Rotated log disappeared")
+        guard let update = catalog.candidates.first(where: { $0.category == "更新安装包" }) else { throw cleanError("Update installer disappeared") }
+        try expect(browserAdvisor.advice(for: update, activity: ActivitySnapshot(known: true, processNames: [])).decision == .keep, "Pending update automatically recommended")
+        try expect(QuickCleaning.cacheRule(quickHome.path + "/Library/Caches/Codex/Default/Partitions/session", home: quickHome.path) == nil, "Whole browser partition treated as disposable")
+        try expect(!catalog.candidates.contains { under($0.id, quickHome.path + "/Library/Caches/Doubao") && $0.id == quickHome.path + "/Library/Caches/Doubao" }, "Parent cache aggregate overlaps precise children")
+        print("PASS: quick scope isolation, exact browser cache matching, credentials and path traversal exclusion")
         let deep = root.appendingPathComponent("scan/one/two/three/four/five")
         try fm.createDirectory(at: deep, withIntermediateDirectories: true)
         for n in 0..<80 { try Data(repeating: 1, count: 1024).write(to: deep.appendingPathComponent("\(n).txt")) }
@@ -34,6 +75,18 @@ enum Verification {
         try expect(cancelled.cancelled && cancelled.visited == 0, "Cancellation not respected")
         let missing = ScanEngine.scan(roots: [root.appendingPathComponent("missing")], options: ScanOptions(), control: ScanControl()) { _ in }
         try expect(!missing.issues.isEmpty && !missing.isComplete, "Missing path silently presented as empty")
+        try expect(report.entryLimitReached != true && report.depthLimitReached != true, "Unlimited default marked as capped")
+        try expect(shallow.depthLimitReached == true && limited.entryLimitReached == true, "Coverage did not distinguish depth and entry limits")
+        try expect(missing.accessErrorCount == 1, "Access errors were not counted")
+        let mirror = ScanEngine.scan(roots: [URL(fileURLWithPath: "/System/Volumes")], options: ScanOptions(), control: ScanControl()) { _ in }
+        try expect(mirror.visited == 0 && mirror.excludedPaths == ["/System/Volumes"], "APFS volume mirrors were scanned or silently excluded")
+        let preferenceStore = ScanPreferencesStore(url: root.appendingPathComponent("settings/scan-settings.json"))
+        let settings = ScanPreferences(roots: [scanRoot.path], options: ScanOptions(maxDepth: 6, entryLimit: 0))
+        try preferenceStore.save(settings)
+        let loadedSettings = try preferenceStore.load()
+        try expect(loadedSettings == settings, "Scan settings did not round-trip")
+        let permissions = try fm.attributesOfItem(atPath: preferenceStore.url.path)[.posixPermissions] as? NSNumber
+        try expect(permissions?.intValue == 0o600, "Scan preferences are not private")
         try expect(ScanEngine.type(for: URL(fileURLWithPath: "video.MP4"), directory: false) == "视频", "Video type recognition failed")
         try expect(ScanEngine.type(for: URL(fileURLWithPath: "Installer.dmg"), directory: false) == "安装包", "Installer type recognition failed")
         try expect(ScanEngine.type(for: URL(fileURLWithPath: "data.img"), directory: false) == "虚拟磁盘", "Virtual disk type recognition failed")
@@ -135,7 +188,8 @@ enum Verification {
         let partial = Candidate(item: item(chrome.id, type: "文件夹", directory: true, complete: false), category: chrome.category, reason: "fixture", risk: .regenerable)
         try expect(engine.advice(for: partial, activity: idle).decision == .keep, "Partial directory recommended")
         let npm = Candidate(item: item(home + "/.npm/_cacache/content-v2", type: "文件夹", directory: true), category: "开发缓存", reason: "fixture", risk: .regenerable)
-        try expect(engine.advice(for: npm, activity: ActivitySnapshot(known: true, processNames: ["node"])).decision == .required, "Active npm/Node cache recommended")
+        try expect(engine.advice(for: npm, activity: ActivitySnapshot(known: true, processNames: ["npm"])).decision == .required, "Active npm cache recommended")
+        try expect(engine.advice(for: npm, activity: ActivitySnapshot(known: true, processNames: ["node"])).decision == .delete, "Unrelated Node process blocks all npm cache")
         try expect(engine.advice(for: npm, activity: idle).decision == .delete, "Idle old npm cache not recognized")
         let unknown = Candidate(item: item(home + "/Library/Caches/unknown", type: "文件夹", directory: true), category: "应用缓存", reason: "fixture", risk: .regenerable)
         try expect(engine.advice(for: unknown, activity: idle).decision == .keep, "Unknown cache assumed disposable")
@@ -197,8 +251,20 @@ enum Verification {
         let journal = TrashStore(journalURL: root.appendingPathComponent("state/history.json"), policy: policy)
         let keepStore = KeepStore(url: root.appendingPathComponent("state/keep.json"))
         let model = CleanerModel(store: journal, keepStore: keepStore, advisor: RecommendationEngine(home: fakeHome.path))
+        model.analysisReport = ScanReport(roots: ["/fixture-analysis-only"])
+        model.scan()
+        for _ in 0..<500 { if !model.scanning { break }; try await Task.sleep(for: .milliseconds(20)) }
+        try expect(!model.scanning && model.report != nil && model.analysisReport?.roots == ["/fixture-analysis-only"], "Quick scan overwrote disk analysis")
+        try expect(model.report?.roots.contains(fakeHome.path) == false, "Model quick scan used full-home settings")
+        model.roots = [logs]; model.options = ScanOptions(maxDepth: 12, entryLimit: 1_000_000)
+        let preferences = ScanPreferencesStore(url: keepStore.url.deletingLastPathComponent().appendingPathComponent("scan-settings.json"))
+        let savedPreferences = try preferences.load()
+        try expect(savedPreferences?.roots == [logs.path], "Model root changes did not persist")
         model.report = ScanReport(roots: [logs.path], items: candidates.map(\.item), candidates: candidates)
         model.refreshRecommendations()
+        model.planRecommended()
+        try expect(model.confirm && !model.busy && fm.fileExists(atPath: candidates[0].id), "Recommendation preview performed deletion before confirmation")
+        model.confirm = false
         model.setChoice(.keep, for: candidates[1])
         model.setChoice(.delete, for: candidates[3])
         try expect(model.recommended.count == 2, "Kept item entered one-click suggestions")
@@ -217,6 +283,12 @@ enum Verification {
         try expect(fm.fileExists(atPath: candidates[0].id), "One-click result could not be restored")
         let restarted = CleanerModel(store: journal, keepStore: keepStore, advisor: RecommendationEngine(home: fakeHome.path))
         try expect(restarted.keptPaths.contains(candidates[1].id), "Keep setting lost on restart")
+        try expect(restarted.roots.map(\.path) == [logs.path] && restarted.options == model.options, "Scan roots/options lost on restart")
+        try Data("broken-scan-settings".utf8).write(to: preferences.url)
+        let damagedSettings = CleanerModel(store: journal, keepStore: keepStore, advisor: RecommendationEngine(home: fakeHome.path))
+        damagedSettings.options = ScanOptions()
+        let damagedData = try Data(contentsOf: preferences.url)
+        try expect(damagedData == Data("broken-scan-settings".utf8), "Corrupt scan settings silently overwritten")
         try Data("broken".utf8).write(to: keepStore.url)
         let corrupt = CleanerModel(store: journal, keepStore: keepStore, advisor: RecommendationEngine(home: fakeHome.path))
         corrupt.report = model.report; corrupt.deleteRecommended()
@@ -224,6 +296,6 @@ enum Verification {
         corrupt.setChoice(.keep, for: candidates[3])
         let unchanged = try Data(contentsOf: keepStore.url)
         try expect(unchanged == Data("broken".utf8), "Corrupt preference was silently overwritten")
-        print("PASS: actual one-click model execution, persistent keep exclusion, open-file interception, per-item journal, restore, restart persistence, corrupt-preference block")
+        print("PASS: actual one-click model execution, persistent keep exclusion, open-file interception, per-item journal, restore, scan/keep settings across restart, corrupt-preference block")
     }
 }

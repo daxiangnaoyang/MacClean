@@ -73,14 +73,18 @@ struct ScanReport: Codable, Sendable {
     var date = Date()
     var advicePolicy: String? = nil
     var adviceDate: Date? = nil
+    var entryLimitReached: Bool? = nil
+    var depthLimitReached: Bool? = nil
+    var accessErrorCount: Int? = nil
+    var excludedPaths: [String]? = nil
     var topItems: [ScanItem] { items.filter { roots.contains($0.path) } }
     var measuredSize: Int64 { topItems.reduce(0) { $0 + $1.logicalSize } }
     var isComplete: Bool { !limited && !cancelled && issues.isEmpty && skippedCloud == 0 }
 }
 
-struct ScanOptions: Codable, Sendable {
+struct ScanOptions: Codable, Sendable, Equatable {
     var maxDepth = 0
-    var entryLimit = 300_000
+    var entryLimit = 0 // Zero means unlimited; cancellation remains available.
     var largeThreshold: Int64 = 100 * 1024 * 1024
     var oldDays = 90
 }
@@ -102,8 +106,9 @@ enum ScanEngine {
     private static let homePath = FileManager.default.homeDirectoryForCurrentUser.path
     static let categories = ["应用缓存", "开发缓存", "旧日志", "旧安装包", "陈旧下载", "大文件"]
     static func defaultRoots(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
-        let paths = ["Library/Logs", "Library/Caches", "Library/Developer/Xcode/DerivedData", ".npm/_cacache", ".cache/pip", "Downloads", "Desktop", "Movies", "Music", "Pictures", "Library/Developer/Xcode/Archives", ".cache/huggingface", ".ollama/models", "Library/Application Support", "Documents"]
-        return paths.map { home.appendingPathComponent($0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+        // Complete home includes hidden folders; the other roots cover shared and system data.
+        let system = ["/Applications", "/Library", "/Users/Shared", "/usr", "/opt", "/private", "/System"]
+        return [home] + system.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
     }
     static func normalizedRoots(_ roots: [URL]) -> [URL] {
         var result: [URL] = []
@@ -143,13 +148,23 @@ enum ScanEngine {
         let fm = FileManager.default
         var lastProgress = Date.distantPast
         var measured: Int64 = 0
+        report.accessErrorCount = 0
+        report.excludedPaths = []
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .isPackageKey, .fileSizeKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .contentModificationDateKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
         func issue(_ path: String, _ message: String) {
+            report.accessErrorCount = (report.accessErrorCount ?? 0) + 1
             if report.issues.count < 250 { report.issues.append(ScanIssue(path: path, message: message)) }
         }
-        func walk(_ url: URL, depth: Int, insidePackage: Bool) -> ScanItem? {
+        func walk(_ inputURL: URL, depth: Int, insidePackage: Bool) -> ScanItem? {
+            // Directory enumeration may return /private/var for a /var root.
+            // Keep root and descendant identifiers in the same lexical form.
+            let url = inputURL.standardizedFileURL
             if control.cancelled { report.cancelled = true; return nil }
-            if report.visited >= options.entryLimit { report.limited = true; return nil }
+            if under(url.path, "/System/Volumes") {
+                if !(report.excludedPaths ?? []).contains(url.path) { report.excludedPaths?.append(url.path) }
+                return nil // Do not double-count Data/Preboot/VM mirrors of startup volumes.
+            }
+            if options.entryLimit > 0 && report.visited >= options.entryLimit { report.limited = true; report.entryLimitReached = true; return nil }
             report.visited += 1
             if Date().timeIntervalSince(lastProgress) > 0.12 {
                 progress(ScanProgress(path: url.path, visited: report.visited, measured: measured))
@@ -167,12 +182,12 @@ enum ScanEngine {
             var latest = v.contentModificationDate
             let package = insidePackage || v.isPackage == true || url.pathExtension == "app"
             if directory {
-                if options.maxDepth > 0 && depth >= options.maxDepth { complete = false; report.limited = true }
+                if options.maxDepth > 0 && depth >= options.maxDepth { complete = false; report.limited = true; report.depthLimitReached = true }
                 else {
                     do {
                         let children = try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys)).sorted { $0.path < $1.path }
                         for child in children {
-                            if control.cancelled || report.visited >= options.entryLimit { complete = false; report.cancelled = control.cancelled; report.limited = !control.cancelled; break }
+                            if control.cancelled || (options.entryLimit > 0 && report.visited >= options.entryLimit) { complete = false; report.cancelled = control.cancelled; if !control.cancelled { report.limited = true; report.entryLimitReached = true }; break }
                             if let sub = walk(child, depth: depth + 1, insidePackage: package) {
                                 logical += sub.logicalSize; allocated += sub.allocatedSize; count += sub.fileCount
                                 if !sub.complete { complete = false }

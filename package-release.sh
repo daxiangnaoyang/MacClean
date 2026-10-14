@@ -7,7 +7,8 @@ if [[ "$MACCLEAN_ARCH" != "arm64" ]]; then
   print -u2 "This release workflow is verified only for Apple Silicon."
   exit 1
 fi
-env MACCLEAN_SYNC_DESKTOP=0 zsh build-app.sh
+# Never distribute this machine's self-signed local identity.
+env MACCLEAN_SYNC_DESKTOP=0 MACCLEAN_SIGN_IDENTITY=- zsh build-app.sh
 MacClean.app/Contents/MacOS/MacClean --self-test
 MacClean.app/Contents/MacOS/MacClean --render-public-docs docs/images
 mkdir -p dist

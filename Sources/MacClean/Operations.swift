@@ -36,12 +36,12 @@ enum AppScanner {
                 if url.pathExtension == "app" {
                     let bundle = Bundle(url: url)
                     let id = bundle?.bundleIdentifier ?? ""
-                    let report = ScanEngine.scan(roots: [url], options: ScanOptions(entryLimit: 100_000), control: control) { _ in }
+                    let report = ScanEngine.scan(roots: [url], options: ScanOptions(), control: control) { _ in }
                     issues.append(contentsOf: report.issues.prefix(max(0, 250 - issues.count)))
                     apps.append(AppInfo(name: bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? url.deletingPathExtension().lastPathComponent,
                                         path: url.path, bundleID: id, version: bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—",
                                         size: report.measuredSize, complete: report.isComplete, protected: id.isEmpty || id.hasPrefix("com.apple.") || id == "com.daxiang.macclean" || url.path == Bundle.main.bundlePath))
-                } else if v?.isDirectory == true && level < 2 { visit(url, level: level + 1) }
+                } else if v?.isDirectory == true { visit(url, level: level + 1) }
             }
         }
         for root in directories { visit(root, level: 0) }
@@ -52,7 +52,7 @@ enum AppScanner {
         let id = app.bundleID
         let paths = ["Library/Caches/\(id)", "Library/Logs/\(id)", "Library/Preferences/\(id).plist", "Library/Application Support/\(id)", "Library/Saved Application State/\(id).savedState", "Library/Containers/\(id)", "Library/HTTPStorages/\(id)", "Library/WebKit/\(id)"]
         let roots = paths.map { home.appendingPathComponent($0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
-        let report = ScanEngine.scan(roots: roots, options: ScanOptions(entryLimit: 200_000), control: control) { _ in }
+        let report = ScanEngine.scan(roots: roots, options: ScanOptions(), control: control) { _ in }
         let items = report.topItems.map { item in
             Candidate(item: item, category: "应用关联文件", reason: "路径名称与 Bundle ID \(id) 精确匹配；可能包含设置、登录状态和个人数据。共享组容器不参与自动匹配。", risk: .review)
         }
@@ -97,7 +97,7 @@ struct PathPolicy: Sendable {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let protected = ["/", "/System", "/Library", "/Applications", home, home + "/Library", home + "/Desktop", home + "/Documents", home + "/Downloads", home + "/Movies", home + "/Pictures", home + "/Music", home + "/Applications", home + "/Library/Caches", home + "/Library/Logs", home + "/Library/Application Support", home + "/Library/Developer", home + "/Library/Developer/Xcode", home + "/Library/Developer/Xcode/DerivedData", home + "/.npm", home + "/.npm/_cacache"]
-        let protectedTrees = [home + "/Library/Keychains", home + "/Library/Mail", home + "/Library/Messages", home + "/Library/Group Containers", home + "/Library/Application Support/MobileSync", home + "/Library/Application Support/MacClean", home + "/.ollama/models", home + "/.cache/huggingface", home + "/Library/Developer/CoreSimulator"] + Self.runtimeProtectedTrees
+        let protectedTrees = [home + "/.Trash", home + "/.ssh", home + "/.gnupg", home + "/.config", home + "/Library/Keychains", home + "/Library/Mail", home + "/Library/Messages", home + "/Library/Group Containers", home + "/Library/Application Support/MobileSync", home + "/Library/Application Support/MacClean", home + "/.ollama/models", home + "/.cache/huggingface", home + "/Library/Developer/CoreSimulator"] + Self.runtimeProtectedTrees
         guard allowedRoots.contains(where: { under(url.path, $0) && url.path != $0 }), !protected.contains(url.path), !protectedTrees.contains(where: { under(url.path, $0) }) else { throw cleanError("此位置受保护，无法在这里清理。") }
         if url.pathComponents.contains(where: { $0 == ".git" || $0.hasSuffix(".photoslibrary") }) { throw cleanError("版本库或照片资料库受保护。") }
         let canonicalParent = url.deletingLastPathComponent().resolvingSymlinksInPath()

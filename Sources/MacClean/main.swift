@@ -19,6 +19,22 @@ struct MacCleanApp: App {
             do { print(String(decoding: try JSONEncoder().encode(result), as: UTF8.self)); exit(0) }
             catch { print("\(error)"); exit(1) }
         }
+        if CommandLine.arguments.contains("--quick-scan-summary") {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let activity = ActivitySnapshot.capture()
+            let advisor = RecommendationEngine(home: home)
+            let scanned = QuickCleaning.scan(home: home, control: ScanControl()) { _ in }
+            do {
+                let report = advisor.apply(to: scanned, activity: activity, kept: try KeepStore().load())
+                let groups = Dictionary(grouping: report.candidates, by: { QuickCleaning.owner($0, home: home) })
+                let rows = groups.keys.sorted().map { name in
+                    let items = groups[name] ?? []
+                    return ["group": name, "bytes": items.reduce(Int64(0)) { $0 + $1.item.logicalSize }, "decisions": Dictionary(grouping: items, by: { $0.advice?.rule ?? "unknown" }).mapValues { $0.reduce(Int64(0)) { $0 + $1.item.logicalSize } }] as [String: Any]
+                }
+                let summary: [String: Any] = ["visited": report.visited, "elapsed": report.elapsed, "errors": report.accessErrorCount ?? report.issues.count, "recommendedBytes": report.candidates.filter { $0.advice?.decision == .delete }.reduce(Int64(0)) { $0 + $1.item.logicalSize }, "groups": rows]
+                print(String(decoding: try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self)); exit(0)
+            } catch { print("SCAN SUMMARY FAILED: \(error)"); exit(1) }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > index + 2 {
             do {
                 try UIValidation.render(directory: URL(fileURLWithPath: CommandLine.arguments[index + 1]), root: URL(fileURLWithPath: CommandLine.arguments[index + 2]))

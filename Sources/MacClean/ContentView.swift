@@ -69,7 +69,7 @@ struct ContentView: View {
                 Label("可恢复操作", systemImage: "shield.lefthalf.filled").foregroundStyle(accent).font(.callout.weight(.medium))
                 Text("选中后预览确认\n移入系统废纸篓\n恢复记录保存在本机").font(.caption).foregroundStyle(.secondary).lineSpacing(5)
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 12))
-            Text("LOCAL · v0.3").font(.system(size: 10, weight: .medium)).tracking(1).foregroundStyle(.tertiary).padding(.top, 12)
+            Text("LOCAL · v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.1")").font(.system(size: 10, weight: .medium)).tracking(1).foregroundStyle(.tertiary).padding(.top, 12)
         }.padding(.horizontal, 20).padding(.bottom, 22).frame(width: 224).background(Color(red: 0.075, green: 0.09, blue: 0.12))
     }
     private var toolbar: some View {
@@ -77,7 +77,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 6) { Text(model.page.rawValue).font(.system(size: 27, weight: .bold)); Text(model.page.subtitle).font(.callout).foregroundStyle(.secondary) }
             Spacer(minLength: 10)
             Button { settings = true } label: { Image(systemName: "gearshape").font(.title3) }.buttonStyle(.plain).help("扫描设置与目录范围")
-            Button { model.exportReport() } label: { Image(systemName: "square.and.arrow.up").font(.title3) }.buttonStyle(.plain).disabled(model.report == nil).help("导出 JSON 扫描报告")
+            Button { model.exportReport() } label: { Image(systemName: "square.and.arrow.up").font(.title3) }.buttonStyle(.plain).disabled((model.page == .space ? model.analysisReport : model.report) == nil).help("导出当前页面的 JSON 扫描报告")
             if model.page == .apps {
                 if model.appLoading { Button("停止应用扫描", systemImage: "stop.fill") { model.cancelApps() }.buttonStyle(.bordered) }
                 else { Button("刷新应用", systemImage: "arrow.clockwise") { model.loadApps() }.buttonStyle(.borderedProminent).disabled(model.busy) }
@@ -86,7 +86,7 @@ struct ContentView: View {
             } else if model.scanning {
                 Button("停止扫描", systemImage: "stop.fill") { model.cancel() }.buttonStyle(.bordered)
             } else {
-                Button(model.report == nil ? "深度扫描" : "重新扫描", systemImage: "viewfinder") { model.scan() }.buttonStyle(.borderedProminent).foregroundStyle(canvas).controlSize(.large).disabled(model.busy || model.roots.isEmpty)
+                Button(model.page == .space ? "全盘空间分析" : "快速扫描", systemImage: "viewfinder") { model.scan() }.buttonStyle(.borderedProminent).foregroundStyle(canvas).controlSize(.large).disabled(model.busy || (model.page == .space && model.roots.isEmpty))
             }
         }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 22)
         .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
@@ -98,52 +98,52 @@ struct ContentView: View {
                 Text("正在递归分析 · \(model.progress.visited.formatted()) 个项目 · \(bytes(model.progress.measured))").font(.callout.weight(.medium))
                 Text(model.progress.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }; Spacer()
-            Text(model.options.maxDepth == 0 ? "全部层级" : "最多 \(model.options.maxDepth) 层").font(.caption).foregroundStyle(accent)
+            Text(model.scanIsAnalysis ? "空间分析" : "快速清理 · 定向扫描").font(.caption).foregroundStyle(accent)
         }.padding(18).background(accent.opacity(0.08))
     }
     private var overview: some View {
         VStack(alignment: .leading, spacing: 24) {
             let disk = model.disk
-            HStack(spacing: 28) {
-                VStack(alignment: .leading, spacing: 13) {
-                    Label("MAC 存储空间", systemImage: "internaldrive").font(.caption.weight(.medium)).tracking(1).foregroundStyle(.secondary)
-                    Text("让每一 GB\n都有来有去。").font(.system(size: 38, weight: .bold)).lineSpacing(3)
-                    Text("\(bytes(disk.free)) 可用 / \(bytes(disk.total)) 总容量").font(.callout).foregroundStyle(accent)
-                    Text("从文件、目录和应用三条线深入分析。\n规则给出依据，最后的决定留给你。").font(.callout).foregroundStyle(.secondary).lineSpacing(4)
-                }; Spacer()
-                ZStack {
-                    Circle().stroke(.white.opacity(0.055), lineWidth: 18)
-                    Circle().trim(from: 0, to: disk.total > 0 ? min(1, max(0, Double(disk.total - disk.free) / Double(disk.total))) : 0)
-                        .stroke(AngularGradient(colors: [accent.opacity(0.2), accent, .cyan], center: .center), style: StrokeStyle(lineWidth: 18, lineCap: .round)).rotationEffect(.degrees(-90))
-                    VStack(spacing: 6) { Text(bytes(disk.free)).font(.system(size: 27, weight: .bold, design: .rounded)); Text("系统报告可用容量").font(.caption).foregroundStyle(.secondary) }
-                }.frame(width: 190, height: 190).padding(20)
-            }.padding(28).card()
-            HStack(spacing: 14) {
-                MetricCard(title: "已分析空间", value: model.report.map { bytes($0.measuredSize) } ?? "—", foot: "所选目录 · 逻辑大小", icon: "chart.pie", color: .blue)
-                MetricCard(title: "建议清理", value: model.report == nil ? "—" : bytes(model.recommendedSize), foot: "\(model.recommended.count) 项通过保守判断", icon: "arrow.triangle.2.circlepath", color: accent)
-                MetricCard(title: "待判断项目", value: model.report == nil ? "—" : "\(model.candidates.count)", foot: "旧文件 / 安装包 / 大文件", icon: "checklist", color: .orange)
-            }
-            if let report = model.report {
-                RecommendationSummary(model: model)
-                CoverageCard(report: report)
-                SectionTitle(title: "空间去向", subtitle: "按所选扫描目录聚合；点击深入查看", action: "查看空间分析") { model.page = .space }
-                DistributionView(items: report.topItems) { path in model.spaceType = "全部"; model.folder = path; model.page = .space }
-                SectionTitle(title: "规则候选", subtitle: "按命中依据分组，不把所有占用都当作垃圾", action: "查看全部") { model.page = .rules }
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    ForEach(ScanEngine.categories, id: \.self) { category in
-                        let items = model.candidates.filter { $0.category == category }
-                        Button { model.category = category; model.page = .rules } label: {
-                            VStack(alignment: .leading, spacing: 10) { HStack { Text(category).font(.headline); Spacer(); Image(systemName: "arrow.up.right").foregroundStyle(.secondary) }; Text(bytes(items.reduce(0) { $0 + $1.item.logicalSize })).font(.title2.bold()); Text("\(items.count) 个结果").font(.caption).foregroundStyle(.secondary) }.padding(18).card()
-                        }.buttonStyle(.plain)
-                    }
+            HStack {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("先清理能确认用途的缓存。").font(.system(size: 30, weight: .bold))
+                    Text("\(bytes(disk.free)) 可用 / \(bytes(disk.total)) 总容量").foregroundStyle(.secondary)
                 }
-            } else {
-                VStack(alignment: .leading, spacing: 14) {
-                    SectionTitle(title: "扫描范围已就绪", subtitle: "\(model.roots.count) 个目录 · 默认递归到全部层级")
-                    Text("包含下载、文档、桌面、媒体、应用缓存、日志、Xcode 构建缓存和本地模型目录。可以在扫描设置中增减目录。").foregroundStyle(.secondary).font(.callout)
-                    HStack { Label("递归统计", systemImage: "folder.badge.gearshape"); Spacer(); Label("命中依据", systemImage: "text.magnifyingglass"); Spacer(); Label("操作可恢复", systemImage: "clock.arrow.circlepath") }.font(.callout).foregroundStyle(accent).padding(.top, 8)
-                }.padding(24).card()
+                Spacer()
+                Image(systemName: "sparkles").font(.system(size: 38)).foregroundStyle(accent)
             }
+            VStack(alignment: .leading, spacing: 18) {
+                Label("快速清理", systemImage: "sparkles").font(.title2.bold())
+                Text("检查浏览器缓存、npm / pip 下载缓存、Xcode 构建缓存及旧日志。不先遍历整个硬盘，不扫描文档目录、照片资料库或聊天数据库。").foregroundStyle(.secondary)
+                HStack {
+                    Button(model.report == nil ? "开始快速扫描" : "重新快速扫描", systemImage: "magnifyingglass") { model.scan() }
+                        .buttonStyle(.borderedProminent).controlSize(.large).foregroundStyle(canvas).disabled(model.scanning || model.busy)
+                    if model.report != nil { Button("查看清理结果") { model.page = .rules }.controlSize(.large) }
+                    Spacer()
+                    Text("只扫描，不自动删除").font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(28).card()
+            if model.report != nil {
+                HStack(spacing: 14) {
+                    MetricCard(title: "已识别可再生成缓存", value: bytes(model.recognizedCacheSize), foot: "按用途识别，不等于现在都可删除", icon: "archivebox", color: .blue)
+                    MetricCard(title: "建议清理", value: bytes(model.recommendedSize), foot: "\(model.recommended.count) 项通过保守判断", icon: "checkmark.seal", color: accent)
+                    MetricCard(title: "退出相关应用后检查", value: bytes(model.deferredCacheSize), foot: "不会替你强制关闭程序", icon: "pause.circle", color: .orange)
+                }
+                RecommendationSummary(model: model)
+            }
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("空间分析", systemImage: "chart.pie").font(.headline)
+                    Text("找出大文件和空间去向。完整扫描单独进行，结果不会混入快速清理。").font(.callout).foregroundStyle(.secondary)
+                    Button("打开空间分析") { model.page = .space }
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading).card()
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("应用卸载", systemImage: "square.stack.3d.up").font(.headline)
+                    Text("查看应用本体和关联文件。关联数据单独确认，避免误删个人内容。").font(.callout).foregroundStyle(.secondary)
+                    Button("管理已安装应用") { model.page = .apps }
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading).card()
+            }
+            Text("首次访问受保护内容需系统授权；固定签名及已保存目录授权继续沿用。扫描失败的目录可以单独查看原因。").font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -172,11 +172,15 @@ private struct CoverageCard: View {
             Text("统计是逻辑大小与已分配空间估算；APFS 克隆、硬链接、快照会影响真正可释放空间。").font(.caption).foregroundStyle(.secondary)
             Text("扫描时间：\(report.date.formatted())").font(.caption2).foregroundStyle(.tertiary)
             Text("取得 \(report.topItems.count) / \(report.roots.count) 个根目录的统计；范围内未读取的项目不会算作零占用。").font(.caption).foregroundStyle(.secondary)
-            if report.limited { Text("已达到深度或条目上限。可提高限制，或缩小范围后重扫。").font(.caption).foregroundStyle(.orange) }
+            if report.entryLimitReached == true { Text("达到自选条目上限 \(report.options.entryLimit.formatted())；在设置中改为“不限”可继续深入。").font(.caption).foregroundStyle(.orange) }
+            if report.depthLimitReached == true { Text("达到自选深度上限 \(report.options.maxDepth) 层；改为“全部层级”后重扫。").font(.caption).foregroundStyle(.orange) }
+            if report.limited && report.entryLimitReached == nil && report.depthLimitReached == nil { Text("旧报告达到深度或条目上限，请用新版不限模式重扫。").font(.caption).foregroundStyle(.orange) }
+            if let excluded = report.excludedPaths, !excluded.isEmpty { Text("主动排除 APFS 卷镜像（/System/Volumes），避免重复统计；不是条目不足。").font(.caption).foregroundStyle(.secondary) }
+            Text("文件统计无法等同磁盘已用空间：系统快照、文件系统元数据、其他用户及访问受限内容可能未归属。未覆盖不代表垃圾，也不代表零占用。").font(.caption).foregroundStyle(.secondary)
             if report.skippedCloud > 0 { Text("\(report.skippedCloud) 个未下载的云端文件被跳过。").font(.caption).foregroundStyle(.orange) }
             if report.skippedLinks > 0 { Text("跳过 \(report.skippedLinks) 个符号链接，避免重复统计和越界。").font(.caption).foregroundStyle(.secondary) }
             if !report.issues.isEmpty {
-                DisclosureGroup("\(report.issues.count) 处访问错误（最多记录 250 处）") {
+                DisclosureGroup("\(report.accessErrorCount ?? report.issues.count) 处访问错误（展示前 250 处）") {
                     ForEach(report.issues) { issue in VStack(alignment: .leading, spacing: 3) { Text(issue.path).textSelection(.enabled); Text(issue.message).foregroundStyle(.secondary) }.font(.caption).padding(.vertical, 5) }
                     Button("打开完全磁盘访问设置") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!) }.font(.caption)
                 }.font(.caption).foregroundStyle(.orange)
@@ -207,15 +211,16 @@ private struct DistributionView: View {
 
 private struct EmptyScan: View {
     @ObservedObject var model: CleanerModel
-    var body: some View { ContentUnavailableView { Label("先做一次深度扫描", systemImage: "viewfinder") } description: { Text("扫描会递归统计文件和目录；完成后即可查看占用与规则命中依据。") } actions: { Button("开始扫描") { model.scan() }.disabled(model.scanning).buttonStyle(.borderedProminent) }.padding(.vertical, 80) }
+    var body: some View { ContentUnavailableView { Label(model.page == .space ? "分析空间去向" : "先检查常见缓存", systemImage: "viewfinder") } description: { Text(model.page == .space ? "按设置的完整范围递归统计。此操作可能较慢，不会自动删除，也不影响快速清理结果。" : "定向检查缓存与日志，完成后按应用查看建议。") } actions: { Button(model.page == .space ? "开始全盘分析" : "开始快速扫描") { model.scan() }.disabled(model.scanning).buttonStyle(.borderedProminent) }.padding(.vertical, 80) }
 }
 
 struct SpaceView: View {
     @ObservedObject var model: CleanerModel
     @ViewState private var limit = 300
     var body: some View {
-        if let report = model.report {
+        if let report = model.analysisReport {
             VStack(alignment: .leading, spacing: 18) {
+                if model.analysisStale { Text("范围或文件已改变，这是上次分析结果；请重新分析更新占用。").font(.caption).foregroundStyle(.orange) }
                 CoverageCard(report: report)
                 let grouped = Dictionary(grouping: report.items.filter { !$0.isDirectory }, by: \.type)
                 let kinds = grouped.keys.sorted { (grouped[$0] ?? []).reduce(Int64(0)) { $0 + $1.logicalSize } > (grouped[$1] ?? []).reduce(Int64(0)) { $0 + $1.logicalSize } }
@@ -282,17 +287,19 @@ private struct RecommendationSummary: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("本次扫描的删除建议").font(.title3.bold())
+                    Text("已识别缓存 \(bytes(model.recognizedCacheSize)) · 日志 \(bytes(model.detectedLogSize))").font(.callout).foregroundStyle(.secondary)
                     Text("建议删除 \(model.recommended.count) 项 · \(bytes(model.recommendedSize))（逻辑大小）").font(.callout).foregroundStyle(accent)
+                    Text("退出相关应用后可重检的缓存：\(bytes(model.deferredCacheSize))").font(.caption).foregroundStyle(.orange)
                     let required = model.candidates.filter { model.recommendation($0).decision == .required }.count
                     Text("建议保留 \(model.candidates.count - required - model.recommended.count) 项 · 必须保留 \(required) 项").font(.caption).foregroundStyle(.secondary)
                 }; Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
-                Button("一键清理建议项", systemImage: "trash") { model.deleteRecommended() }.buttonStyle(.borderedProminent).foregroundStyle(canvas)
+                Button("确认建议清理项", systemImage: "trash") { model.planRecommended() }.buttonStyle(.borderedProminent).foregroundStyle(canvas)
                     .disabled(model.recommended.isEmpty || model.scanning || model.busy || !model.keepReady || model.stale || model.report?.cancelled == true)
             }
-            Text("点击即重检并移入废纸篓，可在恢复中心撤回。仅处理建议删除项；你标记保留的文件会在后续扫描中排除。").font(.caption).foregroundStyle(.secondary)
+            Text("确认后重检并移入废纸篓，清空前可恢复。忽略项、个人文件和必须保留项不参与建议清理。").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text("判断依据：文件用途、目录内最新写入、程序运行状态；未知用途默认保留。").font(.caption).foregroundStyle(.secondary)
+                    Text("精确缓存按用途判断；历史日志保留最近7天。执行前仍重检变化与占用，未知用途保留。").font(.caption).foregroundStyle(.secondary)
                 Spacer(); Button("刷新运行状态与建议") { model.refreshRecommendations() }.font(.caption).disabled(model.busy || model.scanning)
             }
             if model.stale { Text("文件已发生清理或恢复，请重新扫描后再使用一键建议。").font(.caption).foregroundStyle(.orange) }
@@ -303,61 +310,87 @@ private struct RecommendationSummary: View {
 
 struct RulesView: View {
     @ObservedObject var model: CleanerModel
-    @ViewState private var expanded: String?
-    @ViewState private var limit = 300
+    @ViewState private var limit = 100
     var body: some View {
         if let report = model.report {
             VStack(alignment: .leading, spacing: 18) {
                 RecommendationSummary(model: model)
-                CoverageCard(report: report)
+                Picker("查看结果", selection: $model.riskFilter) {
+                    Text("建议清理").tag(AdviceDecision.delete.rawValue)
+                    Text("需要确认").tag(AdviceDecision.keep.rawValue)
+                    Text("需退出应用 / 受保护").tag(AdviceDecision.required.rawValue)
+                }.pickerStyle(.segmented)
                 HStack {
-                    Picker("分类", selection: $model.category) { Text("全部类型").tag("全部"); ForEach(ScanEngine.categories, id: \.self) { Text($0).tag($0) } }.frame(width: 180)
-                    Picker("判断", selection: $model.riskFilter) { Text("全部建议").tag("全部"); ForEach(AdviceDecision.allCases, id: \.self) { Text($0.rawValue).tag($0.rawValue) } }.frame(width: 180)
-                    Spacer(); SearchField(text: $model.query)
-                }
-                HStack {
-                    Text("\(model.filtered.count) 个命中 · 选择 \(model.selected.count) 项 / \(bytes(model.selectedSize))").font(.callout).foregroundStyle(.secondary)
+                    Text("已选 \(model.selected.count) 项 · \(bytes(model.selectedSize))").foregroundStyle(accent)
                     Spacer()
-                    Button("选中建议删除") { for c in model.filtered where model.recommendation(c).decision == .delete { model.selected.insert(c.id) } }.disabled(model.busy || model.scanning)
-                    Button("清空选择") { model.selected.removeAll() }
-                    Button("预览清理", systemImage: "trash") { model.planRules() }.buttonStyle(.borderedProminent).foregroundStyle(canvas).disabled(model.selected.isEmpty || model.busy || model.scanning)
+                    SearchField(text: $model.query)
+                    Button("确认清理所选", systemImage: "trash") { model.planRules() }
+                        .buttonStyle(.borderedProminent).foregroundStyle(canvas)
+                        .disabled(model.selected.isEmpty || model.busy || model.scanning || model.stale)
                 }
-                LazyVStack(spacing: 9) {
-                    ForEach(model.filtered.prefix(limit)) { candidate in
-                        let advice = model.recommendation(candidate)
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 14) {
-                                Toggle("选择", isOn: Binding(get: { model.selected.contains(candidate.id) }, set: { model.setChoice($0 ? .delete : .automatic, for: candidate) })).toggleStyle(.checkbox).labelsHidden().disabled(advice.decision == .required || model.busy || model.scanning)
-                                Image(systemName: candidate.item.icon).foregroundStyle(accent).frame(width: 25)
-                                VStack(alignment: .leading, spacing: 5) { Text(candidate.item.name).font(.callout.weight(.medium)).lineLimit(1); Text(candidate.item.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
-                                Spacer(); AdviceBadge(advice: advice)
-                                if advice.decision != .required {
-                                    Picker("处理方式", selection: Binding(get: { model.choice(candidate) }, set: { model.setChoice($0, for: candidate) })) { ForEach(FileChoice.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.labelsHidden().frame(width: 90).disabled(model.busy || model.scanning)
-                                } else {
-                                    let kept = model.keptPaths.contains(candidate.id)
-                                    Button(kept ? "取消标记" : "始终保留") { model.setChoice(kept ? .automatic : .keep, for: candidate) }.font(.caption).disabled(model.busy || model.scanning || !model.keepReady)
-                                }
-                                Text(bytes(candidate.item.logicalSize)).font(.callout.monospacedDigit().weight(.semibold)).frame(width: 90, alignment: .trailing)
-                                Button { expanded = expanded == candidate.id ? nil : candidate.id } label: { Image(systemName: expanded == candidate.id ? "chevron.up" : "chevron.down") }.buttonStyle(.plain)
+                let visible = model.filtered
+                let groups = Dictionary(grouping: visible, by: { model.cleanupGroup($0) })
+                LazyVStack(spacing: 18) {
+                    ForEach(groups.keys.sorted(), id: \.self) { name in
+                        let items = groups[name] ?? []
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text(name).font(.headline)
+                                Spacer()
+                                Text("\(items.count) 项 · \(bytes(items.reduce(Int64(0)) { $0 + $1.item.logicalSize }))").font(.callout).foregroundStyle(.secondary)
                             }
-                            Text(advice.reason).font(.caption).foregroundStyle(.secondary).lineLimit(expanded == candidate.id ? nil : 2)
-                            if expanded == candidate.id {
-                                Divider()
-                                Text(candidate.category + " · " + candidate.reason).font(.callout).foregroundStyle(.secondary)
-                                Text("最后修改：" + (candidate.item.modified?.formatted() ?? "未获取") + " · 已分配：" + bytes(candidate.item.allocatedSize)).font(.caption).foregroundStyle(.secondary)
-                                Text("目录内最新写入：" + (candidate.item.latestModified?.formatted() ?? "未获取，保守保留")).font(.caption).foregroundStyle(.secondary)
-                                HStack { Text("类型：\(candidate.item.type) · 文件数：\(candidate.item.fileCount)").font(.caption); Spacer(); Button("在 Finder 显示") { model.reveal(candidate.item.path) }.font(.caption) }.foregroundStyle(.secondary)
-                            }
-                        }.padding(16).card()
+                            ForEach(items.prefix(limit)) { candidate in CleanupRow(model: model, candidate: candidate) }
+                            if items.count > limit { Button("显示更多") { limit += 100 } }
+                        }.padding(20).card()
                     }
                 }
-                if model.filtered.isEmpty { ContentUnavailableView("当前筛选没有命中", systemImage: "checkmark.seal", description: Text("未命中不代表扫描覆盖了整个磁盘；可以调整规则阈值或扫描范围。")) }
-                if model.filtered.count > limit { Button("显示更多（共 \(model.filtered.count) 项）") { limit += 300 } }
+                if visible.isEmpty {
+                    ContentUnavailableView("这一类没有可处理项目", systemImage: "checkmark.seal",
+                        description: Text(model.recommended.isEmpty ? "目前没有通过保守规则的清理建议。可检查“需要确认”，或退出相关应用后刷新状态。" : "可切换分类，查看其他结果。"))
+                }
+                DisclosureGroup("扫描详情 · \(report.visited.formatted()) 个项目 · \(report.elapsed.formatted(.number.precision(.fractionLength(1)))) 秒") {
+                    CoverageCard(report: report)
+                    Text("系统组件与关键数据不进入清理清单，可在空间分析中查看占用。").font(.caption).foregroundStyle(.secondary)
+                }.font(.caption).foregroundStyle(.secondary)
             }
         } else { EmptyScan(model: model) }
     }
 }
 
+private struct CleanupRow: View {
+    @ObservedObject var model: CleanerModel
+    let candidate: Candidate
+    @ViewState private var expanded = false
+    var body: some View {
+        let advice = model.recommendation(candidate)
+        let kept = KeepStore.retains(candidate.id, paths: model.keptPaths)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Toggle("选择", isOn: Binding(get: { model.selected.contains(candidate.id) },
+                    set: { model.setChoice($0 ? .delete : .automatic, for: candidate) }))
+                    .toggleStyle(.checkbox).labelsHidden()
+                    .disabled(advice.decision == .required || model.busy || model.scanning || model.stale)
+                Image(systemName: candidate.item.icon).foregroundStyle(accent)
+                Text(candidate.item.name).font(.callout.weight(.medium)).lineLimit(1)
+                Spacer()
+                Text(bytes(candidate.item.logicalSize)).font(.callout.monospacedDigit())
+                Button(kept ? "取消忽略" : "忽略此项") { model.setChoice(kept ? .automatic : .keep, for: candidate) }
+                    .font(.caption).disabled(model.busy || model.scanning)
+                Button { expanded.toggle() } label: { Image(systemName: expanded ? "chevron.up" : "chevron.down") }.buttonStyle(.plain)
+            }
+            Text(advice.reason).font(.caption).foregroundStyle(.secondary)
+            if advice.rule == "owner-running" {
+                Button("已退出相关应用，重新检查") { model.refreshRecommendations() }.font(.caption).disabled(model.busy || model.scanning)
+            }
+            if expanded {
+                Divider()
+                Text(candidate.item.path).font(.caption).textSelection(.enabled)
+                Text(candidate.reason).font(.caption).foregroundStyle(.secondary)
+                Button("在 Finder 显示") { model.reveal(candidate.item.path) }.font(.caption)
+            }
+        }.padding(12).background(.white.opacity(0.025)).clipShape(RoundedRectangle(cornerRadius: 9))
+    }
+}
 struct ApplicationsView: View {
     @ObservedObject var model: CleanerModel
     var body: some View {
@@ -438,18 +471,23 @@ struct ScanSettings: View {
             HStack { Text("扫描设置").font(.title2.bold()); Spacer(); Button("完成") { dismiss() } }
             HStack {
                 Picker("递归深度", selection: $model.options.maxDepth) { Text("全部层级").tag(0); Text("3 层").tag(3); Text("6 层").tag(6); Text("12 层").tag(12) }
-                Picker("条目上限", selection: $model.options.entryLimit) { Text("30 万").tag(300_000); Text("100 万").tag(1_000_000); Text("200 万").tag(2_000_000) }
+                Picker("条目上限", selection: $model.options.entryLimit) { Text("不限（默认）").tag(0); Text("30 万").tag(300_000); Text("100 万").tag(1_000_000); Text("200 万").tag(2_000_000) }
             }
             HStack {
                 Picker("大文件阈值", selection: $model.options.largeThreshold) { ForEach([100, 500, 1024], id: \.self) { n in Text("\(n) MB").tag(Int64(n) * 1024 * 1024) } }
                 Picker("陈旧下载", selection: $model.options.oldDays) { ForEach([30, 90, 180], id: \.self) { n in Text("\(n) 天未修改").tag(n) } }
             }
-            Text("旧日志 ≥30 天；旧安装包 ≥14 天。全部层级也受条目上限约束，达到限制会明确标为部分结果。文件类型按扩展名 / macOS 类型识别，并结合位置和时间判断。").font(.caption).foregroundStyle(.secondary)
+            Text("默认不限深度和条目，可随时停止。自选上限会明确标注截断原因。扫描范围和设置自动保存，重新启动后复用。").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("授权主目录（记住）") { model.authorizeHome() }
+                Button("完全磁盘访问设置") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!) }
+            }
+            Text("首次授权或签名身份改变后，需要在系统设置中启用 MacClean 并重新打开。固定身份下无需每次扫描重复授权；系统撤销权限或目录授权失效时仍需重新确认。").font(.caption).foregroundStyle(.secondary)
             Divider()
-            HStack { Text("扫描目录（\(model.roots.count)）").font(.headline); Spacer(); Button("恢复默认") { model.roots = ScanEngine.defaultRoots() }; Button("添加目录") { model.pickFolder() } }
+            HStack { Text("扫描目录（\(model.roots.count)）").font(.headline); Spacer(); Button("恢复默认") { model.roots = ScanEngine.defaultRoots(); model.options = ScanOptions() }; Button("添加目录") { model.pickFolder() } }
             ScrollView { VStack(alignment: .leading, spacing: 8) { ForEach(model.roots, id: \.path) { root in HStack { Image(systemName: "folder").foregroundStyle(accent); Text(root.path).font(.caption).textSelection(.enabled); Spacer(); Button { model.roots.removeAll { $0 == root } } label: { Image(systemName: "minus.circle") }.buttonStyle(.plain) }.padding(8).background(.white.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 6)) } } }
             Text("新增外置盘等范围可只读分析；清理仅允许用户目录和非系统应用，不会请求管理员权限。设置更改后需要重新扫描。").font(.caption).foregroundStyle(.secondary)
-        }.padding(28).frame(width: 660, height: 590).background(canvas).preferredColorScheme(.dark)
+        }.padding(28).frame(width: 720, height: 690).background(canvas).preferredColorScheme(.dark)
     }
 }
 
