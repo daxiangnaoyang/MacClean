@@ -43,9 +43,6 @@ if [[ "${MACCLEAN_SYNC_DESKTOP:-1}" == "1" && -d "$MACCLEAN_DESKTOP_APP/Contents
       print -u2 "Quit the desktop MacClean before updating it. The project build remains available."
       exit 1
     fi
-    if [[ ! -e "$PWD/.build/MacClean-desktop-before-update.zip" ]]; then
-      ditto -c -k --keepParent "$MACCLEAN_DESKTOP_APP" "$PWD/.build/MacClean-desktop-before-update.zip"
-    fi
     MACCLEAN_DESKTOP_STAGE="$(mktemp "$MACCLEAN_DESKTOP_APP/Contents/MacOS/MacClean.XXXXXX")"
     cp "$MACCLEAN_APP/Contents/MacOS/MacClean" "$MACCLEAN_DESKTOP_STAGE"
     chmod 755 "$MACCLEAN_DESKTOP_STAGE"

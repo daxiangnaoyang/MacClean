@@ -10,7 +10,7 @@ enum Page: String, CaseIterable {
         switch self {
         case .overview: "检查常见缓存和旧日志，确认后再清理。"
         case .space: "递归统计真实文件大小，逐层深入占用最多的目录。"
-        case .rules: "按应用查看建议；需要确认的项目单独处理。"
+        case .rules: "按类型查看扫描结果，选择后预览清理。"
         case .apps: "预览应用本体和按 Bundle ID 匹配的关联文件。"
         case .history: "记录每次操作，并从系统废纸篓恢复到原位置。"
         }
@@ -66,6 +66,15 @@ enum Page: String, CaseIterable {
     private var directoryGrants: [String: DirectoryGrant] = [:]
     var candidates: [Candidate] { report?.candidates ?? [] }
     func cleanupGroup(_ candidate: Candidate) -> String { QuickCleaning.owner(candidate, home: advisor.home) }
+    func cleanupCategory(_ candidate: Candidate) -> String {
+        let path = candidate.item.path
+        if QuickCleaning.isLog(candidate.item, home: advisor.home) || candidate.category.contains("日志") { return "日志与诊断报告" }
+        if candidate.category == "更新安装包" { return "更新安装包" }
+        if QuickCleaning.isBrowserCache(path, home: advisor.home) || path.contains("com.google.Chrome") || path.contains("Microsoft Edge") || path.contains("Brave") || path.contains("firefox") { return "浏览器缓存" }
+        if path.contains("/.npm/") || path.contains("/pip/") || path.contains("/node-gyp/") || path.contains("/Xcode/") { return "开发工具缓存" }
+        if candidate.risk == .regenerable || candidate.category.contains("缓存") { return "应用缓存" }
+        return "其他需要确认的文件"
+    }
     var filtered: [Candidate] {
         candidates.filter { (category == "全部" || $0.category == category) && (riskFilter == "全部" || recommendation($0).decision.rawValue == riskFilter) && (query.isEmpty || $0.item.path.localizedCaseInsensitiveContains(query) || $0.item.type.contains(query)) }
     }

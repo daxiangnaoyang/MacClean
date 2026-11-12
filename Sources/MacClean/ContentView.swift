@@ -85,7 +85,7 @@ struct ContentView: View {
                 Button("刷新记录", systemImage: "arrow.clockwise") { model.refreshHistory() }.buttonStyle(.bordered)
             } else if model.scanning {
                 Button("停止扫描", systemImage: "stop.fill") { model.cancel() }.buttonStyle(.bordered)
-            } else {
+            } else if model.page != .overview {
                 Button(model.page == .space ? "全盘空间分析" : "快速扫描", systemImage: "viewfinder") { model.scan() }.buttonStyle(.borderedProminent).foregroundStyle(canvas).controlSize(.large).disabled(model.busy || (model.page == .space && model.roots.isEmpty))
             }
         }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 22)
@@ -106,7 +106,7 @@ struct ContentView: View {
             let disk = model.disk
             HStack {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("先清理能确认用途的缓存。").font(.system(size: 30, weight: .bold))
+                    Text("给 Mac 腾点空间").font(.system(size: 30, weight: .bold))
                     Text("\(bytes(disk.free)) 可用 / \(bytes(disk.total)) 总容量").foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -114,7 +114,7 @@ struct ContentView: View {
             }
             VStack(alignment: .leading, spacing: 18) {
                 Label("快速清理", systemImage: "sparkles").font(.title2.bold())
-                Text("检查浏览器缓存、npm / pip 下载缓存、Xcode 构建缓存及旧日志。不先遍历整个硬盘，不扫描文档目录、照片资料库或聊天数据库。").foregroundStyle(.secondary)
+                Text("检查应用缓存、浏览器缓存和日志，扫描后选择要清理的内容。").foregroundStyle(.secondary)
                 HStack {
                     Button(model.report == nil ? "开始快速扫描" : "重新快速扫描", systemImage: "magnifyingglass") { model.scan() }
                         .buttonStyle(.borderedProminent).controlSize(.large).foregroundStyle(canvas).disabled(model.scanning || model.busy)
@@ -143,7 +143,7 @@ struct ContentView: View {
                     Button("管理已安装应用") { model.page = .apps }
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading).card()
             }
-            Text("首次访问受保护内容需系统授权；固定签名及已保存目录授权继续沿用。扫描失败的目录可以单独查看原因。").font(.caption).foregroundStyle(.secondary)
+            Text("扫描不会删除文件。清理前可查看明细并确认。").font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -314,33 +314,50 @@ struct RulesView: View {
     var body: some View {
         if let report = model.report {
             VStack(alignment: .leading, spacing: 18) {
-                RecommendationSummary(model: model)
+                HStack(alignment: .center, spacing: 20) {
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 40)).foregroundStyle(accent)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(report.cancelled ? "扫描已停止" : report.isComplete ? "扫描完成" : "扫描完成 · 部分内容未覆盖").font(.title2.bold())
+                        Text("建议清理 \(bytes(model.recommendedSize)) · 已选择 \(model.selected.count) 项").foregroundStyle(.secondary)
+                        if model.deferredCacheSize > 0 { Text("\(bytes(model.deferredCacheSize)) 需退出相关应用后重新检查").font(.caption).foregroundStyle(.orange) }
+                    }
+                    Spacer()
+                    Button("预览清理 \(bytes(model.selectedSize))", systemImage: "trash") { model.planRules() }
+                        .buttonStyle(.borderedProminent).controlSize(.large).foregroundStyle(canvas)
+                        .disabled(model.selected.isEmpty || model.busy || model.scanning || model.stale || !model.keepReady || report.cancelled)
+                }.padding(24).card()
                 Picker("查看结果", selection: $model.riskFilter) {
                     Text("建议清理").tag(AdviceDecision.delete.rawValue)
                     Text("需要确认").tag(AdviceDecision.keep.rawValue)
-                    Text("需退出应用 / 受保护").tag(AdviceDecision.required.rawValue)
+                    Text("暂不能清理").tag(AdviceDecision.required.rawValue)
                 }.pickerStyle(.segmented)
                 HStack {
                     Text("已选 \(model.selected.count) 项 · \(bytes(model.selectedSize))").foregroundStyle(accent)
                     Spacer()
                     SearchField(text: $model.query)
-                    Button("确认清理所选", systemImage: "trash") { model.planRules() }
-                        .buttonStyle(.borderedProminent).foregroundStyle(canvas)
-                        .disabled(model.selected.isEmpty || model.busy || model.scanning || model.stale)
+                    if model.riskFilter == AdviceDecision.required.rawValue {
+                        Button("已退出应用，重新检查") { model.refreshRecommendations() }.disabled(model.busy || model.scanning)
+                    }
                 }
                 let visible = model.filtered
-                let groups = Dictionary(grouping: visible, by: { model.cleanupGroup($0) })
+                let groups = Dictionary(grouping: visible, by: { model.cleanupCategory($0) })
                 LazyVStack(spacing: 18) {
-                    ForEach(groups.keys.sorted(), id: \.self) { name in
+                    ForEach(groups.keys.sorted { a, b in
+                        (groups[a] ?? []).reduce(Int64(0)) { $0 + $1.item.logicalSize } > (groups[b] ?? []).reduce(Int64(0)) { $0 + $1.item.logicalSize }
+                    }, id: \.self) { name in
                         let items = groups[name] ?? []
                         VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text(name).font(.headline)
-                                Spacer()
-                                Text("\(items.count) 项 · \(bytes(items.reduce(Int64(0)) { $0 + $1.item.logicalSize }))").font(.callout).foregroundStyle(.secondary)
+                            DisclosureGroup {
+                                ForEach(items.prefix(limit)) { candidate in CleanupRow(model: model, candidate: candidate) }
+                                if items.count > limit { Button("显示更多") { limit += 100 } }
+                            } label: {
+                                HStack {
+                                    Image(systemName: name.contains("日志") ? "doc.text" : name.contains("浏览器") ? "globe" : "archivebox").foregroundStyle(accent)
+                                    Text(name).font(.headline)
+                                    Spacer()
+                                    Text("\(items.count) 项 · \(bytes(items.reduce(Int64(0)) { $0 + $1.item.logicalSize }))").font(.callout).foregroundStyle(.secondary)
+                                }
                             }
-                            ForEach(items.prefix(limit)) { candidate in CleanupRow(model: model, candidate: candidate) }
-                            if items.count > limit { Button("显示更多") { limit += 100 } }
                         }.padding(20).card()
                     }
                 }
@@ -371,7 +388,10 @@ private struct CleanupRow: View {
                     .toggleStyle(.checkbox).labelsHidden()
                     .disabled(advice.decision == .required || model.busy || model.scanning || model.stale)
                 Image(systemName: candidate.item.icon).foregroundStyle(accent)
-                Text(candidate.item.name).font(.callout.weight(.medium)).lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.cleanupGroup(candidate)).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(candidate.item.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
                 Spacer()
                 Text(bytes(candidate.item.logicalSize)).font(.callout.monospacedDigit())
                 Button(kept ? "取消忽略" : "忽略此项") { model.setChoice(kept ? .automatic : .keep, for: candidate) }
